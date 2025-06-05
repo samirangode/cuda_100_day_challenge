@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <chrono>
 
 #define TILE_SIZE 16
 
@@ -45,6 +46,18 @@ void initialize(float* mat, int rows, int col){
     }
 }
 
+void matmul_cpu(const float* A, const float* B, float* C, int M, int K, int N){
+    for(int i = 0; i< M; i++){
+        for(int j = 0; j<N; j++){
+            float acc = 0.0f;
+            for(int k = 0; k< K; k++){
+                acc += A[i*K + k] * B[k*N + j];
+            }
+            C[i*N + j] = acc;
+        }
+    }
+}
+
 int main(){
     int M = 50, K = 78, N = 63;
 
@@ -55,9 +68,18 @@ int main(){
     float* h_A  = (float*)malloc(size_A);
     float* h_B  = (float*)malloc(size_B);
     float* h_C  = (float*)malloc(size_C);
+    float* h_C_cpu  = (float*)malloc(size_C);
 
     initialize(h_A, M, K);
     initialize(h_B, K, N);
+
+    // CPU timing
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    matmul_cpu(h_A, h_B, h_C_cpu, M, K, N);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    double cpu_ms = std::chrono::duration<double, std::milli>(cpu_end - cpu_start).count();
+    std::cout<< "CPU matmul time:" << cpu_ms << " ms\n";
+    
 
     float *d_A, *d_B, *d_C;
     cudaMalloc(&d_A, size_A);
@@ -72,4 +94,29 @@ int main(){
     // and N is on the x axis 
     dim3 blocks((N + TILE_SIZE -1)/TILE_SIZE, (M + TILE_SIZE -1)/TILE_SIZE);
 
+    // Warm-up
     matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, M, K, N);
+    cudaDeviceSynchronize();
+
+    auto gpu_start = std::chrono::high_resolution_clock::now();
+    matmul_tiled<<<blocks, threads>>>(d_A, d_B, d_C, M, K, N);
+    cudaDeviceSynchronize();
+    auto gpu_end = std::chrono::high_resolution_clock::now();
+    double gpu_ms = std::chrono::duration<double, std::mill>(gpu_end - gpu_start).count();
+    std::cout<<"GPU matmul time: " << gpu_ms << " ms\n";
+
+
+    cudaMemcpy(h_C, d_C, size_C, cudaMemcpyDeviceToHost);
+
+    // --- Check correctness ---
+    double max_abs_err = 0.0;
+    for (int i = 0; i < M * N; ++i) {
+        double err = std::abs(h_C[i] - h_C_cpu[i]);
+        if (err > max_abs_err) max_abs_err = err;
+    }
+    std::cout << "Max abs error (CPU vs GPU): " << max_abs_err << std::endl;
+
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+    free(h_A); free(h_B); free(h_C); free(h_C_cpu);
+    return 0;
+}
